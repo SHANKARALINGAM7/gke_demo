@@ -1,0 +1,72 @@
+name: Deploy FastAPI to GKE-CI/CD
+on:
+  push:
+    branches: [ main ]
+env:
+  GCP_REGION: us-central1
+  ARTIFACT_REGISTRY: demo-repo
+  GCP_PROJECT_ID: qwiklabs-gcp-01-742ce3177efc
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up GCloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Install GKE GCloud auth plugin
+        run: | 
+         gcloud components install gke-gcloud-auth-plugin --quiet
+
+      - name: Configure Docker for Google Artifact Registry
+        run: |
+          gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Create Cluster
+        run: |
+          CLUSTER_NAME=demo-cluster
+          ZONE=us-central1-a
+          if ! gcloud container clusters describe $CLUSTER_NAME --zone $ZONE; then
+            gcloud container clusters create $CLUSTER_NAME \
+              --zone $ZONE \
+              --num-nodes 2
+              --machine-type e2-medium
+          else
+            echo "Cluster $CLUSTER_NAME already exists."
+          fi
+      - name: Set Image tag
+        id: image-tag
+        run: |
+          IMAGE_PATH="${GCP_REGION}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${ARTIFACT_REGISTRY}/demo-repo"
+          echo "tag=${IMAGE_PATH}:latest" >> $GITHUB_OUTPUT
+          echo "tag-sha=${IMAGE_PATH}:${{ github.sha }}" >> $GITHUB_OUTPUT
+      
+      - name: Build Docker Image
+        run: |
+          docker build \
+            --tag ${{ steps.image-tag.outputs.tag }} \
+            --tag ${{ steps.image-tag.outputs.tag-sha }} \
+            --file Dockerfile .
+
+      - name: Push Docker Image
+        run: |
+          docker push ${{ steps.image-tag.outputs.tag }}
+          docker push ${{ steps.image-tag.outputs.tag-sha }}
+
+      - name: Deploy to GKE
+        run: |
+          gcloud container cluster get-credentials demo-cluster --zone us-central1-a --project ${{ env.GCP_PROJECT_ID }}
+          kubectl apply -f k8s/k8s-deployment.yaml
